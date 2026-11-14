@@ -75,16 +75,96 @@ GO
 -- NHIỆM VỤ 1: TẠO CÁC BẢNG SẢN PHẨM VÀ DANH MỤC.
 
 -- 1.1. Tạo bảng Categories (Lưu danh mục sản phẩm).
+CREATE TABLE Categories
+(
+    CategoryID INT IDENTITY(1,1) PRIMARY KEY,
+    CategoryName NVARCHAR(100) NOT NULL,
+    Description NVARCHAR(500) NULL,
+    CreatedAt DATETIME DEFAULT GETDATE(),
+    UpdatedAt DATETIME NULL
+);
 
 -- 1.2. Tạo bảng Products (Lưu thông tin sản phẩm).
+CREATE TABLE Products
+(
+    ProductID INT IDENTITY(1,1) PRIMARY KEY,
+    SKU NVARCHAR(50) NOT NULL CONSTRAINT UQ_Products_SKU UNIQUE,
+    ProductName NVARCHAR(200) NOT NULL,
+    CategoryID INT NOT NULL,
+    Unit NVARCHAR(50) NULL,
+    PurchasePrice DECIMAL(18,2) NOT NULL DEFAULT 0,
+    SellingPrice DECIMAL(18,2) NOT NULL DEFAULT 0,
+    StockQuantity INT NOT NULL DEFAULT 0,
+    Description NVARCHAR(500) NULL,
+    ImageURL NVARCHAR(500) NULL,
+    IsActive BIT NOT NULL DEFAULT 1,
+    CreatedAt DATETIME DEFAULT GETDATE(),
+    UpdatedAt DATETIME NULL,
 
+    CONSTRAINT FK_Products_Categories
+        FOREIGN KEY (CategoryID)
+        REFERENCES Categories(CategoryID),
 
--- NHIỆM VỤ 2: TẠO CÁC BẢNG KHUYẾN MÃI.
+    CONSTRAINT CK_Products_PurchasePrice
+        CHECK (PurchasePrice >= 0),
 
--- 2.1. Tạo bảng Promotions (Lưu chương trình khuyến mãi).
+    CONSTRAINT CK_Products_SellingPrice
+        CHECK (SellingPrice >= 0),
+
+    CONSTRAINT CK_Products_StockQuantity
+        CHECK (StockQuantity >= 0)
+);
+
+-- NHIỆM VỤ 2: TẠO CÁC BẢNG KHUYẾN MÃI--
+-- 2.1. Tạo bảng Promotions (Lưu chương trình khuyến mãi)--
+-- Khuyến mãi theo 2 hình thức giảm giá theo % hoặc giảm giá theo số tiền cố định--
+CREATE TABLE Promotions
+(
+    PromotionID INT IDENTITY(1,1) PRIMARY KEY,
+    PromotionName NVARCHAR(200) NOT NULL,
+    Description NVARCHAR(500) NULL,
+    DiscountType NVARCHAR(20) NOT NULL,
+    DiscountValue DECIMAL(18,2) NOT NULL,
+    StartDate DATETIME NOT NULL,
+    EndDate DATETIME NOT NULL,
+    IsActive BIT NOT NULL DEFAULT 1,
+    CreatedAt DATETIME NOT NULL DEFAULT GETDATE(),
+    UpdatedAt DATETIME NULL,
+
+    CONSTRAINT CK_Promotions_DiscountType
+        CHECK (DiscountType IN (N'Percentage', N'FixedAmount')),
+
+    CONSTRAINT CK_Promotions_DiscountValue
+        CHECK (DiscountValue > 0),
+
+    CONSTRAINT CK_Promotions_DiscountPercentage
+        CHECK (
+            DiscountType <> N'Percentage'
+            OR DiscountValue <= 100
+        ),
+
+    CONSTRAINT CK_Promotions_Date
+        CHECK (EndDate > StartDate)
+);
 
 -- 2.2. Tạo bảng PromotionProducts (Liên kết sản phẩm với khuyến mãi).
+CREATE TABLE PromotionProducts
+(
+    PromotionID INT NOT NULL,
+    ProductID INT NOT NULL,
+    CreatedAt DATETIME NOT NULL DEFAULT GETDATE(),
 
+    CONSTRAINT PK_PromotionProducts
+        PRIMARY KEY (PromotionID, ProductID),
+
+    CONSTRAINT FK_PromotionProducts_Promotions
+        FOREIGN KEY (PromotionID)
+        REFERENCES Promotions(PromotionID),
+
+    CONSTRAINT FK_PromotionProducts_Products
+        FOREIGN KEY (ProductID)
+        REFERENCES Products(ProductID)
+);
 
 -- NHIỆM VỤ 3: THIẾT LẬP CÁC RÀNG BUỘC DỮ LIỆU.
 
@@ -102,39 +182,363 @@ GO
 -- NHIỆM VỤ 4: TẠO CÁC STORED PROCEDURE.
 
 -- 4.1. Tạo Stored Procedure thêm sản phẩm.
+CREATE OR ALTER PROCEDURE dbo.usp_Product_Add
+    @SKU NVARCHAR(50),
+    @ProductName NVARCHAR(200),
+    @CategoryID INT,
+    @Unit NVARCHAR(50) = NULL,
+    @PurchasePrice DECIMAL(18,2) = 0,
+    @SellingPrice DECIMAL(18,2) = 0,
+    @StockQuantity INT = 0,
+    @Description NVARCHAR(500) = NULL,
+    @ImageURL NVARCHAR(500) = NULL
+AS
+BEGIN
+    SET NOCOUNT ON;
+
+    IF @PurchasePrice < 0 OR @SellingPrice < 0 OR @StockQuantity < 0
+        THROW 51001, N'Giá và số lượng tồn không được âm.', 1;
+    IF NOT EXISTS (SELECT 1 FROM dbo.Categories WHERE CategoryID = @CategoryID)
+        THROW 51002, N'Danh mục sản phẩm không tồn tại.', 1;
+    IF EXISTS (SELECT 1 FROM dbo.Products WHERE SKU = @SKU)
+        THROW 51003, N'Mã SKU đã tồn tại.', 1;
+
+    INSERT dbo.Products
+        (SKU, ProductName, CategoryID, Unit, PurchasePrice, SellingPrice,
+         StockQuantity, Description, ImageURL)
+    VALUES
+        (@SKU, @ProductName, @CategoryID, @Unit, @PurchasePrice, @SellingPrice,
+         @StockQuantity, @Description, @ImageURL);
+
+    SELECT CONVERT(INT, SCOPE_IDENTITY()) AS ProductID;
+END;
+GO
+
 
 -- 4.2. Tạo Stored Procedure cập nhật sản phẩm.
+-- NHIỆM VỤ 4.2: Cập nhật sản phẩm.
+CREATE OR ALTER PROCEDURE dbo.usp_Product_Update
+    @ProductID INT,
+    @SKU NVARCHAR(50),
+    @ProductName NVARCHAR(200),
+    @CategoryID INT,
+    @Unit NVARCHAR(50) = NULL,
+    @PurchasePrice DECIMAL(18,2) = 0,
+    @SellingPrice DECIMAL(18,2) = 0,
+    @StockQuantity INT = 0,
+    @Description NVARCHAR(500) = NULL,
+    @ImageURL NVARCHAR(500) = NULL,
+    @IsActive BIT = 1
+AS
+BEGIN
+    SET NOCOUNT ON;
+
+    IF @PurchasePrice < 0 OR @SellingPrice < 0 OR @StockQuantity < 0
+        THROW 51004, N'Giá và số lượng tồn không được âm.', 1;
+    IF NOT EXISTS (SELECT 1 FROM dbo.Categories WHERE CategoryID = @CategoryID)
+        THROW 51005, N'Danh mục sản phẩm không tồn tại.', 1;
+    IF EXISTS (SELECT 1 FROM dbo.Products WHERE SKU = @SKU AND ProductID <> @ProductID)
+        THROW 51006, N'Mã SKU đã được sản phẩm khác sử dụng.', 1;
+
+    UPDATE dbo.Products
+    SET SKU = @SKU,
+        ProductName = @ProductName,
+        CategoryID = @CategoryID,
+        Unit = @Unit,
+        PurchasePrice = @PurchasePrice,
+        SellingPrice = @SellingPrice,
+        StockQuantity = @StockQuantity,
+        Description = @Description,
+        ImageURL = @ImageURL,
+        IsActive = @IsActive,
+        UpdatedAt = GETDATE()
+    WHERE ProductID = @ProductID;
+
+    IF @@ROWCOUNT = 0
+        THROW 51007, N'Không tìm thấy sản phẩm cần cập nhật.', 1;
+END;
+GO
+
 
 -- 4.3. Tạo Stored Procedure xóa hoặc ngừng kinh doanh sản phẩm.
+-- NHIỆM VỤ 4.3: Ngừng kinh doanh sản phẩm (xóa mềm).
+CREATE OR ALTER PROCEDURE dbo.usp_Product_Deactivate
+    @ProductID INT
+AS
+BEGIN
+    SET NOCOUNT ON;
+
+    UPDATE dbo.Products
+    SET IsActive = 0,
+        UpdatedAt = GETDATE()
+    WHERE ProductID = @ProductID;
+
+    IF @@ROWCOUNT = 0
+        THROW 51008, N'Không tìm thấy sản phẩm cần ngừng kinh doanh.', 1;
+END;
+GO
+
 
 -- 4.4. Tạo Stored Procedure tìm kiếm sản phẩm.
+-- NHIỆM VỤ 4.4: Tìm kiếm sản phẩm theo tên, SKU và danh mục.
+CREATE OR ALTER PROCEDURE dbo.usp_Product_Search
+    @Keyword NVARCHAR(200) = NULL,
+    @CategoryID INT = NULL,
+    @IncludeInactive BIT = 0
+AS
+BEGIN
+    SET NOCOUNT ON;
+
+    SELECT p.ProductID, p.SKU, p.ProductName, p.CategoryID, c.CategoryName,
+           p.Unit, p.PurchasePrice, p.SellingPrice, p.StockQuantity,
+           p.Description, p.ImageURL, p.IsActive, p.CreatedAt, p.UpdatedAt
+    FROM dbo.Products AS p
+    INNER JOIN dbo.Categories AS c ON c.CategoryID = p.CategoryID
+    WHERE (@IncludeInactive = 1 OR p.IsActive = 1)
+      AND (@CategoryID IS NULL OR p.CategoryID = @CategoryID)
+      AND (@Keyword IS NULL
+           OR p.ProductName LIKE N'%' + @Keyword + N'%'
+           OR p.SKU LIKE N'%' + @Keyword + N'%'
+           OR c.CategoryName LIKE N'%' + @Keyword + N'%')
+    ORDER BY p.ProductName;
+END;
+GO
 
 -- 4.5. Tạo Stored Procedure quản lý khuyến mãi.
+-- NHIỆM VỤ 4.5: Tạo/cập nhật khuyến mãi.
+CREATE OR ALTER PROCEDURE dbo.usp_Promotion_Save
+    @PromotionName NVARCHAR(200),
+    @DiscountType NVARCHAR(20),
+    @DiscountValue DECIMAL(18,2),
+    @StartDate DATETIME,
+    @EndDate DATETIME,
+    @Description NVARCHAR(500) = NULL,
+    @IsActive BIT = 1,
+    @PromotionID INT = NULL
+AS
+BEGIN
+    SET NOCOUNT ON;
+
+    IF @DiscountType NOT IN (N'Percentage', N'FixedAmount')
+        THROW 51009, N'Loại giảm giá phải là Percentage hoặc FixedAmount.', 1;
+    IF @DiscountValue <= 0 OR
+       (@DiscountType = N'Percentage' AND @DiscountValue > 100)
+        THROW 51010, N'Giá trị giảm giá không hợp lệ.', 1;
+    IF @EndDate <= @StartDate
+        THROW 51011, N'Thời điểm kết thúc phải sau thời điểm bắt đầu.', 1;
+
+    IF @PromotionID IS NULL
+    BEGIN
+        INSERT dbo.Promotions
+            (PromotionName, Description, DiscountType, DiscountValue,
+             StartDate, EndDate, IsActive)
+        VALUES
+            (@PromotionName, @Description, @DiscountType, @DiscountValue,
+             @StartDate, @EndDate, @IsActive);
+
+        SET @PromotionID = CONVERT(INT, SCOPE_IDENTITY());
+    END
+    ELSE
+    BEGIN
+        UPDATE dbo.Promotions
+        SET PromotionName = @PromotionName,
+            Description = @Description,
+            DiscountType = @DiscountType,
+            DiscountValue = @DiscountValue,
+            StartDate = @StartDate,
+            EndDate = @EndDate,
+            IsActive = @IsActive,
+            UpdatedAt = GETDATE()
+        WHERE PromotionID = @PromotionID;
+
+        IF @@ROWCOUNT = 0
+            THROW 51012, N'Không tìm thấy chương trình khuyến mãi.', 1;
+    END;
+
+    SELECT @PromotionID AS PromotionID;
+END;
+GO
+
+-- Gán hoặc gỡ một sản phẩm khỏi chương trình khuyến mãi.
+CREATE OR ALTER PROCEDURE dbo.usp_Promotion_AssignProduct
+    @PromotionID INT,
+    @ProductID INT,
+    @Assign BIT = 1
+AS
+BEGIN
+    SET NOCOUNT ON;
+
+    IF NOT EXISTS (SELECT 1 FROM dbo.Promotions WHERE PromotionID = @PromotionID)
+        THROW 51013, N'Chương trình khuyến mãi không tồn tại.', 1;
+    IF NOT EXISTS (SELECT 1 FROM dbo.Products WHERE ProductID = @ProductID)
+        THROW 51014, N'Sản phẩm không tồn tại.', 1;
+
+    IF @Assign = 1 AND NOT EXISTS
+       (SELECT 1 FROM dbo.PromotionProducts
+        WHERE PromotionID = @PromotionID AND ProductID = @ProductID)
+    BEGIN
+        INSERT dbo.PromotionProducts (PromotionID, ProductID)
+        VALUES (@PromotionID, @ProductID);
+    END
+    ELSE IF @Assign = 0
+    BEGIN
+        DELETE dbo.PromotionProducts
+        WHERE PromotionID = @PromotionID AND ProductID = @ProductID;
+    END;
+END;
+GO
 
 
 -- NHIỆM VỤ 5: TẠO VIEW VÀ DỮ LIỆU MẪU.
 
 -- 5.1. Tạo View danh sách sản phẩm.
+CREATE OR ALTER VIEW dbo.vw_ProductList
+AS
+    SELECT p.ProductID, p.SKU, p.ProductName, p.CategoryID, c.CategoryName,
+           p.Unit, p.PurchasePrice, p.SellingPrice, p.StockQuantity,
+           p.IsActive, p.CreatedAt, p.UpdatedAt
+    FROM dbo.Products AS p
+    INNER JOIN dbo.Categories AS c ON c.CategoryID = p.CategoryID;
+GO
 
 -- 5.2. Tạo View danh mục sản phẩm.
+CREATE OR ALTER VIEW dbo.vw_CategoryProductSummary
+AS
+    SELECT c.CategoryID, c.CategoryName, c.Description,
+           COUNT(p.ProductID) AS ActiveProductCount
+    FROM dbo.Categories AS c
+    LEFT JOIN dbo.Products AS p
+        ON p.CategoryID = c.CategoryID AND p.IsActive = 1
+    GROUP BY c.CategoryID, c.CategoryName, c.Description;
+GO
 
 -- 5.3. Thêm dữ liệu mẫu danh mục sản phẩm.
+INSERT dbo.Categories (CategoryName, Description)
+SELECT v.CategoryName, v.Description
+FROM (VALUES
+    (N'Điện thoại', N'Điện thoại và phụ kiện di động'),
+    (N'Máy tính', N'Máy tính, laptop và thiết bị ngoại vi'),
+    (N'Gia dụng', N'Thiết bị gia dụng'),
+    (N'Phụ kiện', N'Phụ kiện công nghệ'),
+    (N'Văn phòng phẩm', N'Dụng cụ và vật tư văn phòng')
+) AS v(CategoryName, Description)
+WHERE NOT EXISTS
+    (SELECT 1 FROM dbo.Categories AS c WHERE c.CategoryName = v.CategoryName);
+GO
 
 -- 5.4. Thêm tối thiểu 20 sản phẩm mẫu.
+INSERT dbo.Products
+    (SKU, ProductName, CategoryID, Unit, PurchasePrice, SellingPrice,
+     StockQuantity, Description)
+SELECT v.SKU, v.ProductName, c.CategoryID, v.Unit, v.PurchasePrice,
+       v.SellingPrice, v.StockQuantity, v.Description
+FROM (VALUES
+    (N'PHONE-001', N'iPhone 15 128GB', N'Điện thoại', N'Cái', 16500000, 19990000, 12, N'Điện thoại thông minh'),
+    (N'PHONE-002', N'Samsung Galaxy A55', N'Điện thoại', N'Cái', 8500000, 10490000, 18, N'Điện thoại Android'),
+    (N'PHONE-003', N'Xiaomi Redmi Note 13', N'Điện thoại', N'Cái', 4200000, 5490000, 25, N'Điện thoại phổ thông'),
+    (N'PHONE-004', N'OPPO Reno 11F', N'Điện thoại', N'Cái', 6500000, 7990000, 10, N'Điện thoại Android'),
+    (N'PHONE-005', N'Google Pixel 8a', N'Điện thoại', N'Cái', 9500000, 11990000, 7, N'Điện thoại Google'),
+    (N'PC-001', N'Dell Inspiron 15', N'Máy tính', N'Cái', 12500000, 14990000, 8, N'Laptop văn phòng'),
+    (N'PC-002', N'HP Pavilion 14', N'Máy tính', N'Cái', 14500000, 16990000, 6, N'Laptop văn phòng'),
+    (N'PC-003', N'Lenovo IdeaPad Slim 3', N'Máy tính', N'Cái', 10500000, 12990000, 9, N'Laptop học tập'),
+    (N'PC-004', N'Logitech K380', N'Máy tính', N'Cái', 650000, 890000, 30, N'Bàn phím không dây'),
+    (N'PC-005', N'Logitech M331', N'Máy tính', N'Cái', 350000, 490000, 35, N'Chuột không dây'),
+    (N'HOME-001', N'Nồi chiên không dầu 5L', N'Gia dụng', N'Cái', 1500000, 1990000, 14, N'Nồi chiên dung tích 5 lít'),
+    (N'HOME-002', N'Máy lọc không khí mini', N'Gia dụng', N'Cái', 1800000, 2390000, 11, N'Máy lọc không khí'),
+    (N'HOME-003', N'Ấm siêu tốc inox 1.8L', N'Gia dụng', N'Cái', 300000, 450000, 22, N'Ấm đun nước'),
+    (N'HOME-004', N'Máy xay sinh tố 600W', N'Gia dụng', N'Cái', 700000, 990000, 13, N'Máy xay gia đình'),
+    (N'HOME-005', N'Quạt đứng 5 cánh', N'Gia dụng', N'Cái', 550000, 790000, 16, N'Quạt điện'),
+    (N'ACC-001', N'Tai nghe Bluetooth', N'Phụ kiện', N'Cái', 420000, 650000, 28, N'Tai nghe không dây'),
+    (N'ACC-002', N'Cáp USB-C 1m', N'Phụ kiện', N'Sợi', 70000, 120000, 50, N'Cáp sạc USB-C'),
+    (N'ACC-003', N'Sạc nhanh 30W', N'Phụ kiện', N'Cái', 250000, 390000, 32, N'Củ sạc nhanh'),
+    (N'OFF-001', N'Giấy in A4 80gsm', N'Văn phòng phẩm', N'Ream', 65000, 85000, 40, N'Giấy in 500 tờ'),
+    (N'OFF-002', N'Bút bi xanh (hộp 20)', N'Văn phòng phẩm', N'Hộp', 50000, 75000, 45, N'Bút bi mực xanh')
+) AS v(SKU, ProductName, CategoryName, Unit, PurchasePrice,
+       SellingPrice, StockQuantity, Description)
+INNER JOIN dbo.Categories AS c ON c.CategoryName = v.CategoryName
+WHERE NOT EXISTS (SELECT 1 FROM dbo.Products AS p WHERE p.SKU = v.SKU);
+GO
 
 -- 5.5. Thêm dữ liệu chương trình khuyến mãi.
+INSERT dbo.Promotions
+    (PromotionName, Description, DiscountType, DiscountValue, StartDate, EndDate, IsActive)
+SELECT v.PromotionName, v.Description, v.DiscountType, v.DiscountValue,
+       v.StartDate, v.EndDate, 1
+FROM (VALUES
+    (N'Giảm giá mùa mua sắm', N'Giảm 10% một số sản phẩm', N'Percentage',
+     CONVERT(DECIMAL(18,2), 10), DATEADD(DAY, -7, GETDATE()), DATEADD(DAY, 30, GETDATE())),
+    (N'Ưu đãi phụ kiện', N'Giảm 50000 đồng', N'FixedAmount',
+     CONVERT(DECIMAL(18,2), 50000), DATEADD(DAY, -3, GETDATE()), DATEADD(DAY, 14, GETDATE()))
+) AS v(PromotionName, Description, DiscountType, DiscountValue, StartDate, EndDate)
+WHERE NOT EXISTS
+    (SELECT 1 FROM dbo.Promotions AS p WHERE p.PromotionName = v.PromotionName);
+GO
 
+INSERT dbo.PromotionProducts (PromotionID, ProductID)
+SELECT p.PromotionID, pr.ProductID
+FROM dbo.Promotions AS p
+INNER JOIN dbo.Products AS pr
+    ON (p.PromotionName = N'Giảm giá mùa mua sắm' AND pr.SKU IN (N'PHONE-001', N'PC-001'))
+    OR (p.PromotionName = N'Ưu đãi phụ kiện' AND pr.SKU IN (N'ACC-001', N'ACC-003'))
+WHERE NOT EXISTS
+    (SELECT 1 FROM dbo.PromotionProducts AS pp
+     WHERE pp.PromotionID = p.PromotionID AND pp.ProductID = pr.ProductID);
+GO
 
 -- NHIỆM VỤ 6: KIỂM TRA VÀ KIỂM THỬ.
 
 -- 6.1. Kiểm tra thêm, sửa và tìm kiếm sản phẩm.
+BEGIN TRY
+    BEGIN TRANSACTION;
+
+    DECLARE @TestCategoryID INT =
+        (SELECT TOP (1) CategoryID FROM dbo.Categories ORDER BY CategoryID);
+
+    EXEC dbo.usp_Product_Add
+        @SKU = N'TEST-M2-001', @ProductName = N'Sản phẩm kiểm thử',
+        @CategoryID = @TestCategoryID,
+        @Unit = N'Cái', @PurchasePrice = 100000, @SellingPrice = 150000,
+        @StockQuantity = 1;
+
+    DECLARE @TestProductID INT =
+        (SELECT ProductID FROM dbo.Products WHERE SKU = N'TEST-M2-001');
+
+    EXEC dbo.usp_Product_Update
+        @ProductID = @TestProductID, @SKU = N'TEST-M2-001',
+        @ProductName = N'Sản phẩm kiểm thử đã sửa',
+        @CategoryID = @TestCategoryID,
+        @Unit = N'Cái', @PurchasePrice = 100000, @SellingPrice = 160000,
+        @StockQuantity = 2;
+
+    EXEC dbo.usp_Product_Search @Keyword = N'TEST-M2-001';
+    ROLLBACK TRANSACTION;
+END TRY
+BEGIN CATCH
+    IF XACT_STATE() <> 0 ROLLBACK TRANSACTION;
+    THROW;
+END CATCH;
+GO
 
 -- 6.2. Kiểm tra mã SKU bị trùng.
+SELECT SKU, COUNT(*) AS DuplicateCount
+FROM dbo.Products
+GROUP BY SKU
+HAVING COUNT(*) > 1;
+GO
 
 -- 6.3. Kiểm tra chương trình khuyến mãi hết hạn.
+SELECT PromotionID, PromotionName, StartDate, EndDate, IsActive,
+       CASE WHEN EndDate <= GETDATE() THEN N'Đã hết hạn'
+            WHEN StartDate > GETDATE() THEN N'Chưa bắt đầu'
+            ELSE N'Đang áp dụng' END AS PromotionStatus
+FROM dbo.Promotions
+WHERE EndDate <= GETDATE() OR StartDate > GETDATE();
+GO
 
+-- Xem nhanh dữ liệu và view của thành viên 2.
+SELECT * FROM dbo.vw_ProductList ORDER BY CategoryName, ProductName;
+SELECT * FROM dbo.vw_CategoryProductSummary ORDER BY CategoryName;
 
--- =====================================================
 -- THÀNH VIÊN 3: QUẢN LÝ KHO VÀ NHẬP HÀNG
 -- =====================================================
 
