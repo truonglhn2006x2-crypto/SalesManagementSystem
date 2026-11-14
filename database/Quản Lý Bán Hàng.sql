@@ -75,15 +75,48 @@ GO
 -- NHIỆM VỤ 1: TẠO CÁC BẢNG SẢN PHẨM VÀ DANH MỤC.
 
 -- 1.1. Tạo bảng Categories (Lưu danh mục sản phẩm).
+CREATE TABLE Categories
+(
+    CategoryID INT IDENTITY(1,1) PRIMARY KEY,
+    CategoryName NVARCHAR(100) NOT NULL,
+    Description NVARCHAR(500) NULL,
+    CreatedAt DATETIME DEFAULT GETDATE(),
+    UpdatedAt DATETIME NULL
+);
 
 -- 1.2. Tạo bảng Products (Lưu thông tin sản phẩm).
+CREATE TABLE Products
+(
+    ProductID INT IDENTITY(1,1) PRIMARY KEY,
+    ProductName NVARCHAR(200) NOT NULL,
+    CategoryID INT NOT NULL,
+    Unit NVARCHAR(50) NULL,
+    PurchasePrice DECIMAL(18,2) NOT NULL DEFAULT 0,
+    SellingPrice DECIMAL(18,2) NOT NULL DEFAULT 0,
+    StockQuantity INT NOT NULL DEFAULT 0,
+    Description NVARCHAR(500) NULL,
+    ImageURL NVARCHAR(500) NULL,
+    IsActive BIT NOT NULL DEFAULT 1,
+    CreatedAt DATETIME DEFAULT GETDATE(),
+    UpdatedAt DATETIME NULL,
 
+    CONSTRAINT FK_Products_Categories
+        FOREIGN KEY (CategoryID)
+        REFERENCES Categories(CategoryID),
+
+    CONSTRAINT CK_Products_PurchasePrice
+        CHECK (PurchasePrice >= 0),
+
+    CONSTRAINT CK_Products_SellingPrice
+        CHECK (SellingPrice >= 0),
+
+    CONSTRAINT CK_Products_StockQuantity
+        CHECK (StockQuantity >= 0)
+);
 
 -- NHIỆM VỤ 2: TẠO CÁC BẢNG KHUYẾN MÃI.
 
 -- 2.1. Tạo bảng Promotions (Lưu chương trình khuyến mãi).
-
--- 2.2. Tạo bảng PromotionProducts (Liên kết sản phẩm với khuyến mãi).
 
 
 -- NHIỆM VỤ 3: THIẾT LẬP CÁC RÀNG BUỘC DỮ LIỆU.
