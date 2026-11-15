@@ -25,8 +25,6 @@ CREATE TABLE dbo.Users (
     Email            NVARCHAR(100)     NULL,
     Phone            NVARCHAR(15)      NULL,
     IsActive         BIT               NOT NULL,   -- 1 = đang hoạt động, 0 = bị khóa
-    FailedLoginCount INT               NOT NULL,   -- Số lần đăng nhập sai liên tiếp
-    LockReason       NVARCHAR(200)     NULL,       -- Lý do khóa tài khoản
     LastLoginAt      DATETIME2(0)      NULL,       -- Lần đăng nhập gần nhất
     CreatedAt        DATETIME2(0)      NOT NULL,
     UpdatedAt        DATETIME2(0)      NULL
@@ -102,7 +100,6 @@ GO
 -- 2.4. Thiết lập CHECK và DEFAULT phù hợp.
 -- DEFAULT
 ALTER TABLE dbo.Users     ADD CONSTRAINT DF_Users_IsActive         DEFAULT 1             FOR IsActive;
-ALTER TABLE dbo.Users     ADD CONSTRAINT DF_Users_FailedLoginCount DEFAULT 0             FOR FailedLoginCount;
 ALTER TABLE dbo.Users     ADD CONSTRAINT DF_Users_CreatedAt        DEFAULT SYSDATETIME() FOR CreatedAt;
 ALTER TABLE dbo.UserRoles ADD CONSTRAINT DF_UserRoles_AssignedAt   DEFAULT SYSDATETIME() FOR AssignedAt;
 GO
@@ -116,8 +113,6 @@ ALTER TABLE dbo.Users ADD CONSTRAINT CK_Users_Email
     CHECK (Email IS NULL OR (Email LIKE N'_%@_%._%' AND Email NOT LIKE N'% %'));
 ALTER TABLE dbo.Users ADD CONSTRAINT CK_Users_Phone
     CHECK (Phone IS NULL OR (LEN(Phone) BETWEEN 9 AND 15 AND Phone NOT LIKE N'%[^0-9+]%'));
-ALTER TABLE dbo.Users ADD CONSTRAINT CK_Users_FailedLoginCount
-    CHECK (FailedLoginCount >= 0);
 ALTER TABLE dbo.Roles ADD CONSTRAINT CK_Roles_RoleName
     CHECK (LEN(LTRIM(RTRIM(RoleName))) > 0);
 -- PermissionCode: chỉ gồm chữ HOA, số, dấu gạch dưới.
@@ -273,8 +268,8 @@ BEGIN
         THROW 50007, N'Tài khoản không tồn tại.', 1;
     END;
 
-    SELECT u.UserID, u.Username, u.FullName, u.Email, u.Phone, u.IsActive, u.LockReason,
-           u.FailedLoginCount, u.LastLoginAt, u.CreatedAt, u.UpdatedAt,
+    SELECT u.UserID, u.Username, u.FullName, u.Email, u.Phone, u.IsActive,
+           u.LastLoginAt, u.CreatedAt, u.UpdatedAt,
            (SELECT STRING_AGG(r.RoleName, N', ')
             FROM dbo.UserRoles ur JOIN dbo.Roles r ON r.RoleID = ur.RoleID
             WHERE ur.UserID = u.UserID) AS RoleNames
@@ -319,7 +314,7 @@ BEGIN
 END;
 GO
 
--- Đặt lại mật khẩu (dành cho Admin, không cần mật khẩu cũ). Đồng thời xóa bộ đếm đăng nhập sai.
+-- Đặt lại mật khẩu (dành cho Admin, không cần mật khẩu cũ).
 CREATE PROCEDURE dbo.sp_User_ResetPassword
     @UserID      INT,
     @NewPassword NVARCHAR(100)
@@ -339,10 +334,9 @@ BEGIN
 
     DECLARE @Salt UNIQUEIDENTIFIER = NEWID();
     UPDATE dbo.Users
-    SET PasswordSalt     = @Salt,
-        PasswordHash     = dbo.fn_HashPassword(@NewPassword, @Salt),
-        FailedLoginCount = 0,
-        UpdatedAt        = SYSDATETIME()
+    SET PasswordSalt = @Salt,
+        PasswordHash = dbo.fn_HashPassword(@NewPassword, @Salt),
+        UpdatedAt    = SYSDATETIME()
     WHERE UserID = @UserID;
 END;
 GO
@@ -446,7 +440,7 @@ BEGIN
     IF @PageNumber IS NULL OR @PageNumber < 1 SET @PageNumber = 1;
     IF @PageSize   IS NULL OR @PageSize   < 1 SET @PageSize   = 20;
 
-    SELECT u.UserID, u.Username, u.FullName, u.Email, u.Phone, u.IsActive, u.LockReason,
+    SELECT u.UserID, u.Username, u.FullName, u.Email, u.Phone, u.IsActive,
            u.LastLoginAt, u.CreatedAt,
            (SELECT STRING_AGG(r.RoleName, N', ')
             FROM dbo.UserRoles ur JOIN dbo.Roles r ON r.RoleID = ur.RoleID
@@ -507,9 +501,10 @@ END;
 GO
 
 -- 3.4. Tạo Stored Procedure khóa và mở khóa tài khoản.
+-- Khóa/mở khóa do Admin thực hiện thủ công (IsActive: 1 = hoạt động, 0 = bị khóa).
+-- Tài khoản bị khóa không đăng nhập được và không có quyền nào.
 CREATE PROCEDURE dbo.sp_User_Lock
-    @UserID INT,
-    @Reason NVARCHAR(200) = NULL
+    @UserID INT
 AS
 BEGIN
     SET NOCOUNT ON;
@@ -525,9 +520,8 @@ BEGIN
     END;
 
     UPDATE dbo.Users
-    SET IsActive   = 0,
-        LockReason = ISNULL(NULLIF(LTRIM(RTRIM(@Reason)), N''), N'Khóa bởi quản trị viên'),
-        UpdatedAt  = SYSDATETIME()
+    SET IsActive  = 0,
+        UpdatedAt = SYSDATETIME()
     WHERE UserID = @UserID;
 END;
 GO
@@ -544,10 +538,8 @@ BEGIN
     END;
 
     UPDATE dbo.Users
-    SET IsActive         = 1,
-        FailedLoginCount = 0,
-        LockReason       = NULL,
-        UpdatedAt        = SYSDATETIME()
+    SET IsActive  = 1,
+        UpdatedAt = SYSDATETIME()
     WHERE UserID = @UserID;
 END;
 GO
@@ -556,7 +548,7 @@ GO
 -- sp_User_Login luôn trả về đúng 1 dòng: ResultCode, Message, UserID, Username, FullName, RoleNames.
 --   ResultCode =  1 : đăng nhập thành công (UserID, Username... có giá trị)
 --   ResultCode =  0 : sai tên đăng nhập hoặc mật khẩu (không tiết lộ là sai cái nào)
---   ResultCode = -1 : tài khoản bị khóa (hoặc vừa bị khóa do nhập sai 5 lần liên tiếp)
+--   ResultCode = -1 : đúng mật khẩu nhưng tài khoản đang bị Admin khóa
 CREATE PROCEDURE dbo.sp_User_Login
     @Username NVARCHAR(50),
     @Password NVARCHAR(100)
@@ -564,13 +556,12 @@ AS
 BEGIN
     SET NOCOUNT ON;
 
-    DECLARE @MaxFailed INT = 5;
     DECLARE @UserID INT, @StoredUsername NVARCHAR(50), @FullName NVARCHAR(100),
-            @Salt UNIQUEIDENTIFIER, @Hash VARBINARY(32), @IsActive BIT, @Failed INT;
+            @Salt UNIQUEIDENTIFIER, @Hash VARBINARY(32), @IsActive BIT;
     DECLARE @Code INT, @Message NVARCHAR(200), @RoleNames NVARCHAR(500);
 
     SELECT @UserID = UserID, @StoredUsername = Username, @FullName = FullName,
-           @Salt = PasswordSalt, @Hash = PasswordHash, @IsActive = IsActive, @Failed = FailedLoginCount
+           @Salt = PasswordSalt, @Hash = PasswordHash, @IsActive = IsActive
     FROM dbo.Users
     WHERE Username = LTRIM(RTRIM(@Username));
 
@@ -579,29 +570,6 @@ BEGIN
         -- Sai thông tin đăng nhập
         SET @Code = 0;
         SET @Message = N'Tên đăng nhập hoặc mật khẩu không đúng.';
-
-        IF @UserID IS NOT NULL AND @IsActive = 1
-        BEGIN
-            SET @Failed = @Failed + 1;
-
-            IF @Failed >= @MaxFailed
-            BEGIN
-                UPDATE dbo.Users
-                SET FailedLoginCount = @Failed, IsActive = 0,
-                    LockReason = N'Nhập sai mật khẩu quá ' + CAST(@MaxFailed AS NVARCHAR(10)) + N' lần liên tiếp',
-                    UpdatedAt = SYSDATETIME()
-                WHERE UserID = @UserID;
-
-                SET @Code = -1;
-                SET @Message = N'Bạn đã nhập sai mật khẩu quá ' + CAST(@MaxFailed AS NVARCHAR(10))
-                             + N' lần, tài khoản đã bị khóa. Vui lòng liên hệ quản trị viên.';
-            END
-            ELSE
-            BEGIN
-                UPDATE dbo.Users SET FailedLoginCount = @Failed WHERE UserID = @UserID;
-            END;
-        END;
-
         SET @UserID = NULL;
         SET @StoredUsername = NULL;
         SET @FullName = NULL;
@@ -621,9 +589,7 @@ BEGIN
         SET @Code = 1;
         SET @Message = N'Đăng nhập thành công.';
 
-        UPDATE dbo.Users
-        SET FailedLoginCount = 0, LastLoginAt = SYSDATETIME()
-        WHERE UserID = @UserID;
+        UPDATE dbo.Users SET LastLoginAt = SYSDATETIME() WHERE UserID = @UserID;
 
         SELECT @RoleNames = STRING_AGG(r.RoleName, N', ')
         FROM dbo.UserRoles ur JOIN dbo.Roles r ON r.RoleID = ur.RoleID
@@ -774,28 +740,18 @@ INSERT INTO #Login EXEC dbo.sp_User_Login @Username = N'admin', @Password = N'Sa
 INSERT INTO #TestResult (TestNo, Description, Expected, Actual)
 SELECT '5.1.3', N'Sai mật khẩu -> ResultCode = 0', N'0', CAST(ResultCode AS NVARCHAR(10)) FROM #Login;
 
-INSERT INTO #TestResult (TestNo, Description, Expected, Actual)
-SELECT '5.1.4', N'Sai mật khẩu 1 lần -> FailedLoginCount = 1', N'1', CAST(FailedLoginCount AS NVARCHAR(10))
-FROM dbo.Users WHERE Username = N'admin';
-
 DELETE FROM #Login;
 INSERT INTO #Login EXEC dbo.sp_User_Login @Username = N'khong_ton_tai', @Password = N'Admin@123';
 INSERT INTO #TestResult (TestNo, Description, Expected, Actual)
-SELECT '5.1.5', N'Tên đăng nhập không tồn tại -> ResultCode = 0', N'0', CAST(ResultCode AS NVARCHAR(10)) FROM #Login;
-
-DELETE FROM #Login;
-INSERT INTO #Login EXEC dbo.sp_User_Login @Username = N'admin', @Password = N'Admin@123';
-INSERT INTO #TestResult (TestNo, Description, Expected, Actual)
-SELECT '5.1.6', N'Đăng nhập đúng sau khi sai -> FailedLoginCount về 0', N'0', CAST(FailedLoginCount AS NVARCHAR(10))
-FROM dbo.Users WHERE Username = N'admin';
+SELECT '5.1.4', N'Tên đăng nhập không tồn tại -> ResultCode = 0', N'0', CAST(ResultCode AS NVARCHAR(10)) FROM #Login;
 
 -- Test tạo tài khoản trùng username (phải báo lỗi 50004).
 BEGIN TRY
     EXEC dbo.sp_User_Create @Username = N'admin', @Password = N'Abc12345', @FullName = N'Trùng tên', @RoleName = N'Sales';
-    INSERT INTO #TestResult (TestNo, Description, Expected, Actual) VALUES ('5.1.7', N'Tạo tài khoản trùng username phải bị chặn', N'50004', N'NO ERROR');
+    INSERT INTO #TestResult (TestNo, Description, Expected, Actual) VALUES ('5.1.5', N'Tạo tài khoản trùng username phải bị chặn', N'50004', N'NO ERROR');
 END TRY
 BEGIN CATCH
-    INSERT INTO #TestResult (TestNo, Description, Expected, Actual) VALUES ('5.1.7', N'Tạo tài khoản trùng username phải bị chặn', N'50004', CAST(ERROR_NUMBER() AS NVARCHAR(10)));
+    INSERT INTO #TestResult (TestNo, Description, Expected, Actual) VALUES ('5.1.5', N'Tạo tài khoản trùng username phải bị chặn', N'50004', CAST(ERROR_NUMBER() AS NVARCHAR(10)));
 END CATCH;
 
 SELECT * FROM #TestResult WHERE TestNo LIKE '5.1.%' ORDER BY TestNo;
@@ -837,13 +793,11 @@ SELECT * FROM #TestResult WHERE TestNo LIKE '5.2.%' ORDER BY LEN(TestNo), TestNo
 GO
 
 -- 5.3. Kiểm tra trường hợp tài khoản bị khóa.
-DECLARE @Admin INT = (SELECT UserID FROM dbo.Users WHERE Username = N'admin');
+DECLARE @Admin INT  = (SELECT UserID FROM dbo.Users WHERE Username = N'admin');
 DECLARE @Sales2 INT = (SELECT UserID FROM dbo.Users WHERE Username = N'sales02');
-DECLARE @Cust2 INT = (SELECT UserID FROM dbo.Users WHERE Username = N'customer02');
-DECLARE @i INT = 1;
 
 -- (a) Admin khóa sales02 -> đăng nhập đúng mật khẩu vẫn bị từ chối (-1), không có quyền.
-EXEC dbo.sp_User_Lock @UserID = @Sales2, @Reason = N'Test khóa tài khoản';
+EXEC dbo.sp_User_Lock @UserID = @Sales2;
 
 DELETE FROM #Login;
 INSERT INTO #Login EXEC dbo.sp_User_Login @Username = N'sales02', @Password = N'Sales@123';
@@ -860,38 +814,13 @@ INSERT INTO #Login EXEC dbo.sp_User_Login @Username = N'sales02', @Password = N'
 INSERT INTO #TestResult (TestNo, Description, Expected, Actual)
 SELECT '5.3.3', N'Sau khi mở khóa đăng nhập lại -> ResultCode = 1', N'1', CAST(ResultCode AS NVARCHAR(10)) FROM #Login;
 
--- (c) Nhập sai mật khẩu 5 lần liên tiếp -> tự động khóa.
-DELETE FROM #Login;
-WHILE @i <= 5
-BEGIN
-    DELETE FROM #Login;
-    INSERT INTO #Login EXEC dbo.sp_User_Login @Username = N'customer02', @Password = N'SaiMatKhau';
-    SET @i = @i + 1;
-END;
-INSERT INTO #TestResult (TestNo, Description, Expected, Actual)
-SELECT '5.3.4', N'Sai mật khẩu lần thứ 5 -> ResultCode = -1 (vừa bị khóa)', N'-1', CAST(ResultCode AS NVARCHAR(10)) FROM #Login;
-
-INSERT INTO #TestResult (TestNo, Description, Expected, Actual)
-SELECT '5.3.5', N'Sai 5 lần -> IsActive = 0', N'0', CAST(IsActive AS NVARCHAR(1)) FROM dbo.Users WHERE UserID = @Cust2;
-
-DELETE FROM #Login;
-INSERT INTO #Login EXEC dbo.sp_User_Login @Username = N'customer02', @Password = N'Customer@123';
-INSERT INTO #TestResult (TestNo, Description, Expected, Actual)
-SELECT '5.3.6', N'Tài khoản đã bị tự khóa, đúng mật khẩu vẫn không vào được', N'-1', CAST(ResultCode AS NVARCHAR(10)) FROM #Login;
-
-EXEC dbo.sp_User_Unlock @UserID = @Cust2;
-DELETE FROM #Login;
-INSERT INTO #Login EXEC dbo.sp_User_Login @Username = N'customer02', @Password = N'Customer@123';
-INSERT INTO #TestResult (TestNo, Description, Expected, Actual)
-SELECT '5.3.7', N'Mở khóa tài khoản bị tự khóa -> đăng nhập được', N'1', CAST(ResultCode AS NVARCHAR(10)) FROM #Login;
-
--- (d) Không cho khóa Admin hoạt động duy nhất.
+-- (c) Không cho khóa Admin hoạt động duy nhất.
 BEGIN TRY
     EXEC dbo.sp_User_Lock @UserID = @Admin;
-    INSERT INTO #TestResult (TestNo, Description, Expected, Actual) VALUES ('5.3.8', N'Khóa Admin duy nhất phải bị chặn', N'50009', N'NO ERROR');
+    INSERT INTO #TestResult (TestNo, Description, Expected, Actual) VALUES ('5.3.4', N'Khóa Admin duy nhất phải bị chặn', N'50009', N'NO ERROR');
 END TRY
 BEGIN CATCH
-    INSERT INTO #TestResult (TestNo, Description, Expected, Actual) VALUES ('5.3.8', N'Khóa Admin duy nhất phải bị chặn', N'50009', CAST(ERROR_NUMBER() AS NVARCHAR(10)));
+    INSERT INTO #TestResult (TestNo, Description, Expected, Actual) VALUES ('5.3.4', N'Khóa Admin duy nhất phải bị chặn', N'50009', CAST(ERROR_NUMBER() AS NVARCHAR(10)));
 END CATCH;
 
 SELECT * FROM #TestResult WHERE TestNo LIKE '5.3.%' ORDER BY TestNo;
